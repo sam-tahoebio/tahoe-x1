@@ -7,7 +7,8 @@ This directory contains configuration files specifically for running Tahoe-x1 tr
 | File | Description | Duration | Cost Estimate |
 |------|-------------|----------|---------------|
 | `modal_test.yaml` | Quick test run (20 batches) | ~5-10 min | $0.10-0.50 |
-| `modal_70m.yaml` | Full 70M model training | Hours-Days | $$$ |
+
+For full training, copy `modal_test.yaml` and adjust `max_duration` (see [Customizing Configurations](#-customizing-configurations) below).
 
 ## 🚀 Quick Start
 
