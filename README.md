@@ -77,7 +77,8 @@ tahoe-x1/
 ├── tutorials/                # Jupyter notebook tutorials
 │   ├── clustering_tutorial.ipynb  # Cell clustering and UMAP visualization
 │   └── training_tutorial.ipynb    # Training walkthrough
-└── configs/                      
+└── configs/
+    ├──modal/                 # Modal platform configuration files
     ├──runai/                 # RunAI configuration files
     ├──mcli/                  # MosaicML platform configuration files
     ├──gcloud/                # Google Cloud configuration files
@@ -188,6 +189,44 @@ We provide pre-built Docker images for ease of use:
 | Image Name | Base Image | Description |
 |------------|------------|-------------|
 | [`ghcr.io/tahoebio/tahoe-x1:1.0.0`](https://github.com/tahoebio/tahoe-x1/pkgs/container/tahoe-x1) | `mosaicml/llm-foundry:2.2.1_cu121_flash2-813d596` | Current release image for Tahoe-x1 |
+
+### Platform Support
+
+Tahoe-x1 supports training on multiple cloud platforms:
+
+| Platform | Configuration Location | Description |
+|----------|----------------------|-------------|
+| **Modal** | `configs/modal/` | Serverless GPU platform with automatic scaling ([Setup Guide](configs/modal/README.md)) |
+| **MosaicML (MCLI)** | `configs/mcli/` | MosaicML's managed training platform |
+| **Google Cloud (GKE)** | `configs/gcloud/` | Google Kubernetes Engine setup |
+| **RunAI** | `configs/runai/` | Kubernetes-based GPU orchestration |
+
+#### Quick Start - Modal
+
+[Modal](https://modal.com) provides serverless GPU infrastructure with automatic scaling and persistent volumes.
+
+```bash
+# Install Modal CLI
+pip install modal
+
+# Authenticate (one-time setup)
+modal setup
+
+# Run training with 2x A100 GPUs (cost-controlled test with 20 batches)
+modal run scripts/modal_train.py --config configs/modal/modal_test.yaml
+
+# Skip data download if already cached
+modal run scripts/modal_train.py --config configs/modal/modal_test.yaml --no-download-data
+```
+
+**Features:**
+- 🚀 **Serverless**: No cluster management required
+- 💾 **Persistent Volumes**: Automatic caching of datasets (266 GB) and checkpoints
+- 📊 **Multi-GPU Support**: FSDP with 2-8 A100 GPUs
+- 💰 **Cost-Controlled**: Pay per second of GPU usage
+- ⚡ **Fast Setup**: One-time data download (~30 min), then instant subsequent runs
+
+See [configs/modal/README.md](configs/modal/README.md) for detailed setup instructions and cost estimates.
 
 ## 📊 Datasets
 

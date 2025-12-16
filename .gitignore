@@ -163,3 +163,6 @@ runai/*/
 *.json
 debug_notebooks/
 ckpt/
+
+# Claude context (for development, not tracked)
+claude.md
