@@ -292,28 +292,11 @@ def verify_dataset(dataset_path: str = "/data/tahoe-100m/train") -> dict:
 
 
 # =============================================================================
-# TRAINING FUNCTION
+# TRAINING FUNCTIONS
 # =============================================================================
 
 
-@app.function(
-    image=image,
-    gpu="A100:2",  # 2x A100 GPUs for testing FSDP/parallel processing (cost: ~$2-3 for 20 batches)
-    volumes={
-        "/data": data_volume,
-        "/checkpoints": checkpoint_volume,
-        "/cache": cache_volume,
-    },
-    timeout=3600 * 12,  # 12 hours max (sufficient for full training runs)
-    # Note: Spot instances configuration may vary by Modal version
-    secrets=[
-        # W&B API key for experiment tracking
-        modal.Secret.from_name("wandb-api-key"),
-        # Add AWS secrets if needed for private S3 buckets
-        # modal.Secret.from_name("aws-credentials")
-    ],
-)
-def train_model(config_path: str, run_name: Optional[str] = None) -> dict:
+def _train_impl(config_path: str, run_name: Optional[str] = None, gpu_type: str = "A100") -> dict:
     """
     Main training function - wraps the existing scripts/train.py.
 
@@ -413,7 +396,42 @@ def train_model(config_path: str, run_name: Optional[str] = None) -> dict:
         "status": "success",
         "config": config_path,
         "run_name": run_name or cfg.get("run_name", "unknown"),
+        "gpu_type": gpu_type,
     }
+
+
+# Thin wrappers with different GPU configurations
+
+@app.function(
+    image=image,
+    gpu="A100:2",  # 2x A100 GPUs for testing
+    volumes={
+        "/data": data_volume,
+        "/checkpoints": checkpoint_volume,
+        "/cache": cache_volume,
+    },
+    timeout=3600 * 12,
+    secrets=[modal.Secret.from_name("wandb-api-key")],
+)
+def train_model(config_path: str, run_name: Optional[str] = None) -> dict:
+    """Training with 2x A100 GPUs (for testing)."""
+    return _train_impl(config_path, run_name, gpu_type="A100")
+
+
+@app.function(
+    image=image,
+    gpu="H100:8",  # 8x H100 GPUs for full-scale training
+    volumes={
+        "/data": data_volume,
+        "/checkpoints": checkpoint_volume,
+        "/cache": cache_volume,
+    },
+    timeout=3600 * 12,
+    secrets=[modal.Secret.from_name("wandb-api-key")],
+)
+def train_model_8xh100(config_path: str, run_name: Optional[str] = None) -> dict:
+    """Training with 8x H100 GPUs (for full-scale training)."""
+    return _train_impl(config_path, run_name, gpu_type="H100")
 
 
 # =============================================================================
@@ -471,7 +489,14 @@ def main(
 
     # Step 3: Run training
     print("\n🏋️  Step 3/3: Starting training...")
-    result = train_model.remote(config, run_name)
+
+    # Automatically choose the right training function based on config
+    if "70m" in config or "8xh100" in config.lower() or "h100" in config.lower():
+        print("   Using 8x H100 GPUs for full-scale training...")
+        result = train_model_8xh100.remote(config, run_name)
+    else:
+        print("   Using 2x A100 GPUs for testing...")
+        result = train_model.remote(config, run_name)
 
     print("\n✅ Pipeline complete!")
     print(f"   Result: {result}")

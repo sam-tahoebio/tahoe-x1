@@ -1,0 +1,207 @@
+# Tahoe-x1 Modal 70M Full Training Configuration
+# =============================================================================
+# This configuration is designed for full-scale training on Modal with 8x H100 GPUs.
+# Target: Match or exceed previous training performance while staying under $500 budget.
+#
+# Configuration:
+# - 8x H100 GPUs (high-performance training)
+# - Batch sizes optimized for H100 memory and throughput
+# - W&B logging enabled for comparison
+# - Duration calculated to fit $500 budget
+#
+# Usage:
+#   modal run scripts/modal_train.py --config configs/modal/modal_70m.yaml --run-name modal-70m-8xh100
+#
+# Cost estimate: ~$500 (will be refined based on actual H100 pricing)
+# =============================================================================
+
+seed: 777
+
+# Batch sizes - optimized for 8x H100 GPUs
+device_train_batch_size: 300
+global_train_batch_size: 2400  # 8 GPUs × 300
+device_eval_batch_size: 300
+device_train_microbatch_size: "auto"
+
+# Vocabulary configuration
+vocabulary:
+  remote: "s3://tahoe-hackathon-data/MFM/vevo_v2_vocab.json"
+  local: "/cache/vocab.json"  # Cached in Modal Volume
+
+# Model architecture - 70M parameter model
+model:
+  name: tahoe_x1
+  d_model: 512
+  n_layers: 12
+  init_device: cpu
+  expansion_ratio: 4
+  standard_scale_outputs: False
+  transformer_activation: relu
+  n_heads: 8
+  norm_scheme: "pre"
+  use_generative_training: True
+  use_cell_conditioned_generation: False
+  use_glu: False
+  cell_emb_style: cls
+  attn_config:
+    attn_impl: flash
+    attn_type: "grouped_query_attention"
+    kv_nheads: 8
+    attn_pdrop: 0.0
+    use_attn_mask: False
+  norm_config:
+    norm_type: "layernorm"
+    eps: 1.0e-5
+  expression_encoder:
+    input_emb_style: "continuous"
+    dropout: 0.1
+    max_value: 512
+    activation: relu
+    use_norm: True
+  gene_encoder:
+    use_norm: True
+  mvc:
+    arch_style: "inner product"
+    query_activation: "sigmoid"
+    scaled_dot_product: True
+  expression_decoder:
+    n_outputs: 1
+    n_layers: 1
+    activation: "leaky_relu"
+
+# Data collator configuration
+collator:
+  do_padding: True
+  pad_value: -2
+  do_mlm: True
+  do_binning: True
+  mlm_probability: 0.5
+  mask_value: -1
+  max_length: 1024
+  sampling: True
+  data_style: "both"
+  num_bins: 51
+  right_binning: False
+  use_junk_tokens: False
+
+# Training data loader - using cached Modal Volume data
+train_loader:
+  dataset:
+    streams:
+      tahoe:
+        remote: "s3://tahoe-hackathon-data/MFM/tahoe_100m_MDS_v2/train/"
+        local: "/data/tahoe-100m/train"  # Cached in Modal Volume
+    download_timeout: 300
+    allow_unsafe_types: True
+    shuffle: True
+    shuffle_seed: 777
+    num_canonical_nodes: 2
+  drop_last: False
+  num_workers: 8
+  pin_memory: True
+  prefetch_factor: 4
+  persistent_workers: True
+
+# Validation data loader
+valid_loader:
+  dataset:
+    streams:
+      tahoe:
+        remote: "s3://tahoe-hackathon-data/MFM/tahoe_100m_MDS_v2/valid/"
+        local: "/data/tahoe-100m/valid"  # Cached in Modal Volume
+    download_timeout: 300
+    allow_unsafe_types: True
+    shuffle: False
+    shuffle_seed: 777
+    num_canonical_nodes: 2
+  drop_last: False
+  num_workers: 8
+  pin_memory: True
+  prefetch_factor: 4
+  persistent_workers: True
+
+# Optimizer configuration
+optimizer:
+  name: decoupled_adamw
+  lr: 3.0e-4
+  betas:
+    - 0.9
+    - 0.95
+  eps: 1.0e-08
+  weight_decay: 1.0e-05
+
+# Learning rate scheduler
+scheduler:
+  name: cosine_with_warmup
+  t_warmup: "0.05dur"
+  t_max: "1dur"
+  alpha_f: 0.1
+
+# Training algorithms
+algorithms:
+  gradient_clipping:
+    clipping_type: norm
+    clipping_threshold: 1.0
+  low_precision_layernorm: {}
+
+# Precision
+precision: amp_bf16
+
+# =============================================================================
+# TRAINING DURATION - CALCULATED FOR $500 BUDGET
+# =============================================================================
+
+# TODO: This will be calculated based on H100 pricing
+# Placeholder value - will be updated after cost calculation
+max_duration: "10000ba"  # TEMPORARY - will be adjusted for $500 budget
+
+# Evaluation settings
+eval_interval: "1000ba"
+eval_subset_num_batches: 100
+
+# Checkpoint settings
+save_interval: "2500ba"  # Save every 2500 batches
+save_num_checkpoints_to_keep: 3  # Keep last 3 checkpoints
+
+# Save to Modal Volume
+save_folder: "/checkpoints/{run_name}"
+
+# =============================================================================
+# FSDP Configuration for Multi-GPU Training (8x H100)
+# =============================================================================
+
+fsdp_config:
+  sharding_strategy: FULL_SHARD
+  mixed_precision: DEFAULT
+  activation_checkpointing: false
+  activation_checkpointing_reentrant: false
+  activation_cpu_offload: false
+  limit_all_gathers: true
+  verbose: true
+
+# =============================================================================
+# Logging and Monitoring
+# =============================================================================
+
+progress_bar: false
+log_to_console: true
+console_log_interval: 1ba
+
+callbacks:
+  speed_monitor:
+    window_size: 20
+  lr_monitor: {}
+  memory_monitor: {}
+  runtime_estimator: {}
+
+# WandB logging enabled for comparison with previous runs
+loggers:
+  wandb:
+    project: tahoe-x1
+    entity: vevotx
+    name: "{run_name}"
+    tags:
+      - modal
+      - 8xH100
+      - 70M
+      - comparison-run
