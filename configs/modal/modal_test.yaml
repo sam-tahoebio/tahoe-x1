@@ -187,8 +187,9 @@ callbacks:
   memory_monitor: {}
   runtime_estimator: {}
 
-# Optional: Enable WandB logging
-# loggers:
-#   wandb:
-#     project: tahoe-x1-modal
-#     entity: your-wandb-entity
+# WandB logging enabled
+loggers:
+  wandb:
+    project: tahoe-x1
+    entity: vevotx
+    name: "{run_name}"

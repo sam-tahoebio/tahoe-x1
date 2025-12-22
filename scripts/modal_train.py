@@ -304,10 +304,12 @@ def verify_dataset(dataset_path: str = "/data/tahoe-100m/train") -> dict:
         "/checkpoints": checkpoint_volume,
         "/cache": cache_volume,
     },
-    timeout=3600 * 4,  # 4 hours max (reduced for testing)
+    timeout=3600 * 12,  # 12 hours max (sufficient for full training runs)
     # Note: Spot instances configuration may vary by Modal version
     secrets=[
-        # Add secrets if needed for private S3 buckets
+        # W&B API key for experiment tracking
+        modal.Secret.from_name("wandb-api-key"),
+        # Add AWS secrets if needed for private S3 buckets
         # modal.Secret.from_name("aws-credentials")
     ],
 )
@@ -368,6 +370,12 @@ def train_model(config_path: str, run_name: Optional[str] = None) -> dict:
     # Set run name if provided
     if run_name:
         cfg.run_name = run_name
+        # Also update W&B logger name if it exists
+        if "loggers" in cfg and "wandb" in cfg.loggers:
+            cfg.loggers.wandb.name = run_name
+            # Set entity to vevotx organization
+            if "entity" not in cfg.loggers.wandb:
+                cfg.loggers.wandb.entity = "vevotx"
 
     print("\nFinal configuration:")
     print(OmegaConf.to_yaml(cfg))

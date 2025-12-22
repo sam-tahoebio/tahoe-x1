@@ -45,6 +45,35 @@ modal app logs tahoe-x1-training
 modal run scripts/modal_train.py::list_checkpoints
 ```
 
+### 4. Enable Weights & Biases (Optional)
+
+Track your training runs with W&B for experiment comparison and visualization:
+
+```bash
+# 1. Set up W&B secret (first time only)
+modal secret create wandb-api-key WANDB_API_KEY="your-wandb-api-key"
+
+# 2. Run with W&B logging enabled
+modal run scripts/modal_train.py --config configs/modal/modal_test.yaml --run-name my-experiment
+
+# Your run will appear at: https://wandb.ai/vevotx/tahoe-x1/runs/...
+```
+
+**W&B Configuration** (`modal_test.yaml`):
+```yaml
+loggers:
+  wandb:
+    project: tahoe-x1      # W&B project name
+    entity: vevotx         # Organization name
+    name: "{run_name}"     # Run name (auto-filled)
+```
+
+The modal_train.py automatically:
+- ✅ Sets the run name from `--run-name` parameter
+- ✅ Logs all training metrics (loss, MFU, throughput, etc.)
+- ✅ Tracks hyperparameters and system info
+- ✅ Enables real-time visualization in W&B dashboard
+
 ## ⚙️ Configuration Details
 
 ### `modal_test.yaml`
