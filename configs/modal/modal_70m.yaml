@@ -151,9 +151,11 @@ precision: amp_bf16
 # TRAINING DURATION - CALCULATED FOR $500 BUDGET
 # =============================================================================
 
-# TODO: This will be calculated based on H100 pricing
-# Placeholder value - will be updated after cost calculation
-max_duration: "10000ba"  # TEMPORARY - will be adjusted for $500 budget
+# Cost calculation (8x H100 @ $3.95/hour):
+# - Cost per hour: 8 × $3.95 = $31.60/hour
+# - 1 epoch ≈ 40,000 batches ≈ 7.4 hours ≈ $234
+# - Leaves $266 buffer in $500 budget
+max_duration: "1ep"  # 1 full epoch through the dataset
 
 # Evaluation settings
 eval_interval: "1000ba"
