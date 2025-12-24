@@ -21,6 +21,7 @@ import sys
 from typing import Optional
 
 import modal
+import modal.experimental  # Required for clustered multi-node training
 
 # =============================================================================
 # MODAL APP AND IMAGE DEFINITION
@@ -430,8 +431,149 @@ def train_model(config_path: str, run_name: Optional[str] = None) -> dict:
     secrets=[modal.Secret.from_name("wandb-api-key")],
 )
 def train_model_8xh100(config_path: str, run_name: Optional[str] = None) -> dict:
-    """Training with 8x H100 GPUs (for full-scale training)."""
+    """Training with 8x H100 GPUs (single-node full-scale training)."""
     return _train_impl(config_path, run_name, gpu_type="H100")
+
+
+# Multi-node training configuration
+N_NODES = 2  # Number of nodes in cluster
+N_GPU_PER_NODE = 8  # GPUs per node (8x H100 per node)
+GPU_CONFIG = f"H100:{N_GPU_PER_NODE}"
+
+@app.function(
+    image=image,
+    gpu=GPU_CONFIG,  # 8x H100 per node
+    volumes={
+        "/data": data_volume,
+        "/checkpoints": checkpoint_volume,
+        "/cache": cache_volume,
+    },
+    timeout=3600 * 12,
+    secrets=[modal.Secret.from_name("wandb-api-key")],
+)
+@modal.experimental.clustered(size=N_NODES, rdma=True)  # Enable RDMA for H100 inter-node communication
+def train_model_2node_16xh100(config_path: str, run_name: Optional[str] = None) -> dict:
+    """
+    Training with 2 nodes × 8x H100 GPUs = 16 GPUs total (multi-node distributed training).
+
+    Uses Modal's @clustered decorator for multi-node gang scheduling.
+    Each node gets 8 H100 GPUs, and Composer handles inter-node communication.
+    """
+    import torch
+    from omegaconf import OmegaConf
+
+    # Get cluster information from Modal
+    cluster_info = modal.experimental.get_cluster_info()
+    node_rank = cluster_info.rank  # Which node am I? (0, 1)
+    world_size = len(cluster_info.container_ips)  # Total nodes (2)
+    master_addr = cluster_info.container_ips[0]  # IP of node 0 (master)
+    task_id = os.environ["MODAL_TASK_ID"]
+
+    print("=" * 80)
+    print("TAHOE-X1 MULTI-NODE TRAINING ON MODAL")
+    print("=" * 80)
+    print(f"\nCluster Info:")
+    print(f"  Node Rank: {node_rank}/{world_size}")
+    print(f"  Master Address: {master_addr}")
+    print(f"  Task ID: {task_id}")
+
+    # GPU info
+    num_gpus = torch.cuda.device_count()
+    print(f"\nGPU Info (Node {node_rank}):")
+    print(f"  Available GPUs: {num_gpus}")
+    print(f"  GPU Type: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None'}")
+    print(f"  Total GPUs in cluster: {num_gpus * world_size}")
+
+    # Load and configure training config
+    print(f"\nLoading config: {config_path}")
+    cfg = OmegaConf.load(config_path)
+
+    # Override paths for Modal Volumes
+    if "save_folder" not in cfg or not cfg.save_folder.startswith("/checkpoints"):
+        if run_name:
+            cfg.save_folder = f"/checkpoints/{run_name}"
+        else:
+            cfg.save_folder = f"/checkpoints/{{run_name}}"
+
+    # Update vocabulary paths
+    if "vocabulary" in cfg:
+        cfg.vocabulary.local = "/cache/vocab.json"
+
+    # Update data loader paths to use cached data
+    if "train_loader" in cfg and "dataset" in cfg.train_loader:
+        for stream_name, stream_config in cfg.train_loader.dataset.streams.items():
+            if "local" in stream_config:
+                original_local = stream_config.local
+                if not original_local.startswith("/data"):
+                    stream_config.local = f"/data/{pathlib.Path(original_local).name}"
+
+    if "valid_loader" in cfg and "dataset" in cfg.valid_loader:
+        for stream_name, stream_config in cfg.valid_loader.dataset.streams.items():
+            if "local" in stream_config:
+                original_local = stream_config.local
+                if not original_local.startswith("/data"):
+                    stream_config.local = f"/data/{pathlib.Path(original_local).name}"
+
+    # Set run name if provided
+    if run_name:
+        cfg.run_name = run_name
+        if "loggers" in cfg and "wandb" in cfg.loggers:
+            cfg.loggers.wandb.name = run_name
+            if "entity" not in cfg.loggers.wandb:
+                cfg.loggers.wandb.entity = "vevotx"
+
+    if node_rank == 0:
+        print("\nFinal configuration (from master node):")
+        print(OmegaConf.to_yaml(cfg))
+
+    # Save config to temporary file
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        OmegaConf.save(cfg, f.name)
+        temp_config_path = f.name
+
+    # Launch Composer with multi-node configuration
+    # Composer's launcher will handle distributed setup using these environment variables
+    print("\n" + "=" * 80)
+    print(f"STARTING TRAINING (Node {node_rank}/{world_size})")
+    print("=" * 80 + "\n")
+
+    # Composer CLI with multi-node parameters
+    # These match what torch.distributed.run expects
+    cmd = [
+        "composer",
+        f"--nnodes={world_size}",
+        f"--node_rank={node_rank}",
+        f"--master_addr={master_addr}",
+        f"--master_port=1234",
+        f"--nproc_per_node={num_gpus}",
+        "/root/scripts/train.py",
+        temp_config_path,
+    ]
+
+    print(f"Launching command: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+    # Cleanup
+    pathlib.Path(temp_config_path).unlink()
+
+    # Only master node commits checkpoint volume
+    if node_rank == 0:
+        print("\nCommitting checkpoint volume (from master node)...")
+        checkpoint_volume.commit()
+
+    print("\n" + "=" * 80)
+    print(f"TRAINING COMPLETE (Node {node_rank})")
+    print("=" * 80)
+
+    return {
+        "status": "success",
+        "config": config_path,
+        "run_name": run_name or cfg.get("run_name", "unknown"),
+        "gpu_type": "H100-multinode",
+        "node_rank": node_rank,
+        "world_size": world_size,
+    }
 
 
 # =============================================================================
@@ -491,8 +633,11 @@ def main(
     print("\n🏋️  Step 3/3: Starting training...")
 
     # Automatically choose the right training function based on config
-    if "70m" in config or "8xh100" in config.lower() or "h100" in config.lower():
-        print("   Using 8x H100 GPUs for full-scale training...")
+    if "2node" in config.lower() or "16xh100" in config.lower() or "multinode" in config.lower():
+        print("   Using 2 nodes × 8x H100 GPUs = 16 GPUs (multi-node training)...")
+        result = train_model_2node_16xh100.remote(config, run_name)
+    elif "70m" in config or "8xh100" in config.lower() or "h100" in config.lower():
+        print("   Using 8x H100 GPUs (single-node training)...")
         result = train_model_8xh100.remote(config, run_name)
     else:
         print("   Using 2x A100 GPUs for testing...")

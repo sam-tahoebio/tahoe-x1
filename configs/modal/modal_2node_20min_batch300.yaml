@@ -1,0 +1,216 @@
+# Tahoe-x1 Modal 2-Node Experiment 1B: Baseline Configuration
+# =============================================================================
+# Experiment 1B: Measure 2-node baseline performance
+#
+# Goal: Establish 2-node baseline with same per-GPU batch size as 1-node run
+# This allows direct comparison to measure communication overhead.
+#
+# Configuration:
+# - 2 nodes × 8 H100 GPUs = 16 GPUs total
+# - Batch size: 300 per GPU (same as 1-node baseline)
+# - Global batch: 4,800 (16 × 300)
+# - Duration: ~20 minutes (~4,000 batches)
+# - FSDP: HYBRID_SHARD (optimized for multi-node)
+#
+#
+# Usage:
+#   modal run scripts/modal_train.py --config configs/modal/modal_2node_20min_batch300.yaml --run-name exp1b-2node-batch300 --no-download-data
+# =============================================================================
+
+seed: 777
+
+# Batch sizes - 2 nodes × 8 H100s = 16 GPUs
+device_train_batch_size: 300
+global_train_batch_size: 4800  # 16 GPUs × 300
+device_eval_batch_size: 300
+device_train_microbatch_size: "auto"
+
+# Vocabulary configuration
+vocabulary:
+  remote: "s3://tahoe-hackathon-data/MFM/vevo_v2_vocab.json"
+  local: "/cache/vocab.json"
+
+# Model architecture - 70M parameter model (same as 1-node baseline)
+model:
+  name: tahoe_x1
+  d_model: 512
+  n_layers: 12
+  init_device: cpu
+  expansion_ratio: 4
+  standard_scale_outputs: False
+  transformer_activation: relu
+  n_heads: 8
+  norm_scheme: "pre"
+  use_generative_training: True
+  use_cell_conditioned_generation: False
+  use_glu: False
+  cell_emb_style: cls
+  attn_config:
+    attn_impl: flash
+    attn_type: "grouped_query_attention"
+    kv_nheads: 8
+    attn_pdrop: 0.0
+    use_attn_mask: False
+  norm_config:
+    norm_type: "layernorm"
+    eps: 1.0e-5
+  expression_encoder:
+    input_emb_style: "continuous"
+    dropout: 0.1
+    max_value: 512
+    activation: relu
+    use_norm: True
+  gene_encoder:
+    use_norm: True
+  mvc:
+    arch_style: "inner product"
+    query_activation: "sigmoid"
+    scaled_dot_product: True
+  expression_decoder:
+    n_outputs: 1
+    n_layers: 1
+    activation: "leaky_relu"
+
+# Data collator configuration
+collator:
+  do_padding: True
+  pad_value: -2
+  do_mlm: True
+  do_binning: True
+  mlm_probability: 0.5
+  mask_value: -1
+  max_length: 1024
+  sampling: True
+  data_style: "both"
+  num_bins: 51
+  right_binning: False
+  use_junk_tokens: False
+
+# Training data loader
+train_loader:
+  dataset:
+    streams:
+      tahoe:
+        remote: "s3://tahoe-hackathon-data/MFM/tahoe_100m_MDS_v2/train/"
+        local: "/data/tahoe-100m/train"
+    download_timeout: 300
+    allow_unsafe_types: True
+    shuffle: True
+    shuffle_seed: 777
+    num_canonical_nodes: 2  # Important: matches our 2-node setup
+  drop_last: False
+  num_workers: 8  # Baseline - same as 1-node
+  pin_memory: True
+  prefetch_factor: 4
+  persistent_workers: True
+
+# Validation data loader
+valid_loader:
+  dataset:
+    streams:
+      tahoe:
+        remote: "s3://tahoe-hackathon-data/MFM/tahoe_100m_MDS_v2/valid/"
+        local: "/data/tahoe-100m/valid"
+    download_timeout: 300
+    allow_unsafe_types: True
+    shuffle: False
+    shuffle_seed: 777
+    num_canonical_nodes: 2
+  drop_last: False
+  num_workers: 8
+  pin_memory: True
+  prefetch_factor: 4
+  persistent_workers: True
+
+# Optimizer configuration
+optimizer:
+  name: decoupled_adamw
+  lr: 3.0e-4
+  betas:
+    - 0.9
+    - 0.95
+  eps: 1.0e-08
+  weight_decay: 1.0e-05
+
+# Learning rate scheduler
+scheduler:
+  name: cosine_with_warmup
+  t_warmup: "0.05dur"
+  t_max: "1dur"
+  alpha_f: 0.1
+
+# Training algorithms
+algorithms:
+  gradient_clipping:
+    clipping_type: norm
+    clipping_threshold: 1.0
+  low_precision_layernorm: {}
+
+# Precision
+precision: amp_bf16
+
+# =============================================================================
+# TRAINING DURATION - 20 MINUTES (~4000 BATCHES)
+# =============================================================================
+# Cost calculation (16x H100 @ $3.95/hour each):
+# - Cost per hour: 16 × $3.95 = $63.20/hour
+# - 20 minutes = 0.333 hours = $21.05
+# - Estimated throughput: ~3.5 batches/sec (accounting for comm overhead)
+# - Expected batches in 20 min: ~4,000 batches
+max_duration: "4000ba"  # ~20 minutes
+
+# Evaluation settings
+eval_interval: "500ba"  # More frequent evals for short run
+eval_subset_num_batches: 100
+
+# Checkpoint settings
+save_interval: "2000ba"  # 2 checkpoints during run
+save_num_checkpoints_to_keep: 2
+
+# Save to Modal Volume
+save_folder: "/checkpoints/{run_name}"
+
+# =============================================================================
+# FSDP Configuration for Multi-Node Training (2 nodes × 8 H100s)
+# =============================================================================
+# HYBRID_SHARD is optimal for multi-node:
+# - Shards model within each node (reduces per-GPU memory)
+# - Replicates across nodes (reduces inter-node communication)
+# - Best balance of memory efficiency and communication overhead
+fsdp_config:
+  sharding_strategy: HYBRID_SHARD  # Key change for multi-node!
+  mixed_precision: DEFAULT
+  activation_checkpointing: false  # Keep disabled for baseline comparison
+  activation_checkpointing_reentrant: false
+  activation_cpu_offload: false
+  limit_all_gathers: true
+  verbose: true
+
+# =============================================================================
+# Logging and Monitoring
+# =============================================================================
+progress_bar: false
+log_to_console: true
+console_log_interval: 1ba
+
+callbacks:
+  speed_monitor:
+    window_size: 20
+  lr_monitor: {}
+  memory_monitor: {}
+  runtime_estimator: {}
+
+# WandB logging for experiment tracking
+loggers:
+  wandb:
+    project: tahoe-x1
+    entity: vevotx
+    name: "{run_name}"
+    tags:
+      - modal
+      - 2-node
+      - 16xH100
+      - 70M
+      - batch300
+      - experiment-1b
+      - baseline
