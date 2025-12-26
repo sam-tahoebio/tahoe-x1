@@ -67,8 +67,60 @@ cache_volume = modal.Volume.from_name(
 )
 
 # =============================================================================
-# DATA DOWNLOAD FUNCTIONS
+# DATA MANAGEMENT FUNCTIONS
 # =============================================================================
+
+
+@app.function(
+    image=image,
+    volumes={"/data": data_volume},
+    timeout=60,  # Quick check, should be fast
+)
+def check_data_exists(
+    train_path: str = "/data/tahoe-100m/train",
+    val_path: str = "/data/tahoe-100m/valid",
+) -> dict:
+    """Check if training data exists and is valid in the Modal volume."""
+    import pathlib
+
+    train_dir = pathlib.Path(train_path)
+    val_dir = pathlib.Path(val_path)
+
+    result = {
+        "train_exists": False,
+        "val_exists": False,
+        "train_file_count": 0,
+        "val_file_count": 0,
+        "ready": False,
+    }
+
+    # Check training data
+    if train_dir.exists():
+        train_files = list(train_dir.glob("**/*.mds*"))
+        result["train_exists"] = True
+        result["train_file_count"] = len(train_files)
+        print(f"✓ Training data found: {len(train_files)} MDS files in {train_path}")
+    else:
+        print(f"✗ Training data not found at {train_path}")
+
+    # Check validation data
+    if val_dir.exists():
+        val_files = list(val_dir.glob("**/*.mds*"))
+        result["val_exists"] = True
+        result["val_file_count"] = len(val_files)
+        print(f"✓ Validation data found: {len(val_files)} MDS files in {val_path}")
+    else:
+        print(f"✗ Validation data not found at {val_path}")
+
+    # Data is ready if both exist and have files
+    result["ready"] = (
+        result["train_exists"]
+        and result["val_exists"]
+        and result["train_file_count"] > 0
+        and result["val_file_count"] > 0
+    )
+
+    return result
 
 
 def copy_concurrent(src: pathlib.Path, dest: pathlib.Path, max_threads: int = 24) -> None:
@@ -106,12 +158,12 @@ def copy_concurrent(src: pathlib.Path, dest: pathlib.Path, max_threads: int = 24
 
 @app.function(
     image=image,
+    cpu=32,  # CPU-only, no GPUs (much cheaper for data download)
     volumes={
         "/data": data_volume,
         "/cache": cache_volume,
     },
     timeout=3600 * 12,  # 12 hours for initial download + copy to volume (266GB takes time)
-    cpu=8.0,  # More CPUs for parallel download
 )
 def download_dataset_from_s3(
     s3_path: str,
@@ -119,8 +171,10 @@ def download_dataset_from_s3(
     dataset_name: str = "dataset",
 ) -> None:
     """
-    Download dataset from S3 to Modal Volume.
-    Only downloads if data doesn't already exist.
+    Download dataset from S3 to Modal Volume using CPU-only container.
+
+    This runs on a 32-core CPU container (no GPUs) to avoid paying for idle GPUs
+    during data download. Only after data is ready do we allocate GPUs for training.
 
     Args:
         s3_path: S3 URI (e.g., s3://bucket/path/to/data/)
@@ -135,9 +189,14 @@ def download_dataset_from_s3(
         print(f"  Contents: {list(local_path.glob('*'))[:5]}...")
         return
 
-    print(f"Downloading {dataset_name} from S3...")
-    print(f"  Source: {s3_path}")
-    print(f"  Destination: {local_path}")
+    print("\n" + "=" * 80)
+    print("DATA DOWNLOAD (CPU-ONLY CONTAINER)")
+    print("=" * 80)
+    print(f"CPU cores: 32 (no GPUs - cost-optimized)")
+    print(f"Dataset: {dataset_name}")
+    print(f"Source: {s3_path}")
+    print(f"Destination: {local_path}")
+    print("=" * 80 + "\n")
 
     # Download to /tmp first (faster than writing directly to volume)
     tmp_path = pathlib.Path(f"/tmp/download/{dataset_name}")
@@ -220,7 +279,12 @@ def download_dataset_from_s3(
     print("Committing volume...")
     data_volume.commit()
 
-    print(f"✓ Successfully cached {dataset_name}")
+    print("\n" + "=" * 80)
+    print(f"✅ DATA DOWNLOAD COMPLETE: {dataset_name}")
+    print("=" * 80)
+    print(f"Files: {file_count}")
+    print(f"Size: {total_size / (1024**3):.2f} GB")
+    print("=" * 80 + "\n")
 
 
 @app.function(
@@ -585,52 +649,73 @@ def train_model_2node_16xh100(config_path: str, run_name: Optional[str] = None) 
 def main(
     config: str = "configs/modal/modal_test.yaml",
     run_name: Optional[str] = None,
-    download_data: bool = True,
+    skip_data_check: bool = False,
 ):
     """
     Main entrypoint for Modal training.
 
+    This automatically:
+    1. Checks if vocabulary exists in Modal volume
+    2. Checks if training data exists in Modal volume
+    3. If not, downloads data using CPU-only container (no GPU cost)
+    4. Validates data is correct
+    5. Only then allocates GPUs and starts training
+
     Args:
         config: Path to config YAML file
         run_name: Optional custom run name
-        download_data: Whether to download/check data before training
+        skip_data_check: Skip data existence check and download (default: False)
 
     Example:
         modal run modal_train.py --config configs/modal/modal_test.yaml
         modal run modal_train.py --config configs/modal/modal_test.yaml --run-name my-test-run
-        modal run modal_train.py --config configs/modal/modal_test.yaml --no-download-data
+        modal run modal_train.py --config configs/modal/modal_test.yaml --skip-data-check
     """
-    print("🚀 Tahoe-x1 Modal Training Pipeline")
+    print("\n" + "=" * 80)
+    print("🚀 LAUNCHING TAHOE-X1 TRAINING ON MODAL")
+    print("=" * 80)
     print(f"   Config: {config}")
-    if run_name:
-        print(f"   Run Name: {run_name}")
+    print(f"   Run name: {run_name or 'from config'}")
+    print("=" * 80 + "\n")
 
     # Step 1: Download vocabulary if needed
-    print("\n📥 Step 1/3: Checking vocabulary cache...")
+    print("📦 Step 1/4: Checking vocabulary cache...")
     download_vocabulary.remote()
 
-    # Step 2: Download/check training data if requested
-    if download_data:
-        print("\n📥 Step 2/3: Checking training data cache...")
-        print("   (This may take hours on first run, but will be cached)")
+    # Step 2: Check if data exists (unless skipped)
+    if not skip_data_check:
+        print("\n📦 Step 2/4: Checking if data exists in Modal volume...")
+        data_status = check_data_exists.remote()
 
-        # Download tahoe-100m dataset (default for testing)
-        download_dataset_from_s3.remote(
-            s3_path="s3://tahoe-hackathon-data/MFM/tahoe_100m_MDS_v2/train/",
-            local_path="/data/tahoe-100m/train",
-            dataset_name="tahoe-100m-train",
-        )
+        if not data_status["ready"]:
+            print("\n⚠️  Data not ready. Need to download.\n")
 
-        download_dataset_from_s3.remote(
-            s3_path="s3://tahoe-hackathon-data/MFM/tahoe_100m_MDS_v2/valid/",
-            local_path="/data/tahoe-100m/valid",
-            dataset_name="tahoe-100m-valid",
-        )
+            # Step 3: Download data using CPU-only container (no GPU cost!)
+            print("📦 Step 3/4: Downloading data (CPU-only container, no GPUs)...")
+
+            # Download tahoe-100m dataset (default for testing)
+            download_dataset_from_s3.remote(
+                s3_path="s3://tahoe-hackathon-data/MFM/tahoe_100m_MDS_v2/train/",
+                local_path="/data/tahoe-100m/train",
+                dataset_name="tahoe-100m-train",
+            )
+
+            download_dataset_from_s3.remote(
+                s3_path="s3://tahoe-hackathon-data/MFM/tahoe_100m_MDS_v2/valid/",
+                local_path="/data/tahoe-100m/valid",
+                dataset_name="tahoe-100m-valid",
+            )
+
+            print("\n✅ Data download complete!")
+        else:
+            print(f"✅ Data already exists in volume (skipping download)")
+            print(f"   Training files: {data_status['train_file_count']}")
+            print(f"   Validation files: {data_status['val_file_count']}")
     else:
-        print("\n⏭️  Step 2/3: Skipping data download (--no-download-data)")
+        print("\n⚠️  Skipping data check (--skip-data-check flag)")
 
-    # Step 3: Run training
-    print("\n🏋️  Step 3/3: Starting training...")
+    # Step 4: Run training on GPUs
+    print("\n📦 Step 4/4: Starting training on GPUs...")
 
     # Automatically choose the right training function based on config
     if "2node" in config.lower() or "16xh100" in config.lower() or "multinode" in config.lower():
@@ -643,8 +728,13 @@ def main(
         print("   Using 2x A100 GPUs for testing...")
         result = train_model.remote(config, run_name)
 
-    print("\n✅ Pipeline complete!")
-    print(f"   Result: {result}")
+    print("\n" + "=" * 80)
+    print("✅ TRAINING COMPLETE!")
+    print("=" * 80)
+    print(f"   Status: {result['status']}")
+    print(f"   Run: {result['run_name']}")
+    print(f"   GPU Type: {result['gpu_type']}")
+    print("=" * 80 + "\n")
 
 
 @app.function(
