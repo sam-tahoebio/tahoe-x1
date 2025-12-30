@@ -32,10 +32,40 @@ app = modal.App("tahoe-x1-training")
 # Use pre-built tahoe-x1 Docker image with all dependencies
 # This includes: PyTorch, flash-attn, llm-foundry, mosaicml-streaming, awscli, boto3, etc.
 # Base: mosaicml/llm-foundry:2.2.1_cu121_flash2-813d596
+#
+# EFA (Elastic Fabric Adapter) Setup for Multi-Node RDMA:
+# AWS EFA enables high-performance RDMA networking between instances for multi-node training.
+# We install EFA userspace libraries and the OFI-NCCL plugin so NCCL can use EFA for communication.
+EFA_VERSION = "1.44.0"
+OFI_NCCL_VERSION = "1.17.2-aws"
+
 image = (
     modal.Image.from_registry("ghcr.io/tahoebio/tahoe-x1:1.0.0")
     # Create symlink for Modal Python detection (python is at /composer-python/python)
     .run_commands("ln -sf /composer-python/python /usr/bin/python")
+    # Install EFA dependencies for multi-node RDMA support
+    .apt_install(
+        "libibverbs-dev",
+        "libibverbs1",
+        "wget",
+        "ca-certificates",
+    )
+    # Install AWS EFA userspace libraries
+    .run_commands(
+        f"cd /tmp && wget -q https://efa-installer.amazonaws.com/aws-efa-installer-{EFA_VERSION}.tar.gz",
+        f"cd /tmp && tar -xzf aws-efa-installer-{EFA_VERSION}.tar.gz",
+        f"cd /tmp/aws-efa-installer && ./efa_installer.sh -y --minimal",
+        "rm -rf /tmp/aws-efa-installer*",
+    )
+    # Install AWS OFI-NCCL plugin (enables NCCL to use EFA)
+    .run_commands(
+        f"cd /opt && wget -q https://github.com/aws/aws-ofi-nccl/releases/download/v{OFI_NCCL_VERSION}/aws-ofi-nccl-{OFI_NCCL_VERSION}.tar.gz",
+        f"cd /opt && tar -xzf aws-ofi-nccl-{OFI_NCCL_VERSION}.tar.gz",
+        f"rm aws-ofi-nccl-{OFI_NCCL_VERSION}.tar.gz",
+        # Remove EFA from default library paths to prevent conflicts on non-EFA hardware
+        "rm -f /etc/ld.so.conf.d/000_efa.conf /etc/ld.so.conf.d/100_ofinccl.conf",
+        "ldconfig",
+    )
     .workdir("/root")
     # Add local code for development (overrides the installed tahoe-x1 package)
     # Note: add_local_dir must come absolutely last in the build chain
@@ -499,6 +529,10 @@ def train_model_8xh100(config_path: str, run_name: Optional[str] = None) -> dict
     return _train_impl(config_path, run_name, gpu_type="H100")
 
 
+# =============================================================================
+# MULTI-NODE TRAINING WITH RDMA/EFA
+# =============================================================================
+
 # Multi-node training configuration
 N_NODES = 2  # Number of nodes in cluster
 N_GPU_PER_NODE = 8  # GPUs per node (8x H100 per node)
@@ -514,8 +548,19 @@ GPU_CONFIG = f"H100:{N_GPU_PER_NODE}"
     },
     timeout=3600 * 12,
     secrets=[modal.Secret.from_name("wandb-api-key")],
+    # EFA environment variables for NCCL to use AWS EFA networking
+    env={
+        "LD_LIBRARY_PATH": "/opt/amazon/ofi-nccl/lib:/opt/amazon/efa/lib",
+        "NCCL_NET_PLUGIN": "ofi",
+    },
 )
-@modal.experimental.clustered(size=N_NODES, rdma=True)  # Enable RDMA for H100 inter-node communication
+@modal.experimental.clustered(
+    size=N_NODES,
+    rdma=True,  # Enable RDMA for high-speed inter-node communication
+    experimental_options={
+        "efa_enabled": True,  # Enable AWS EFA hardware
+    },
+)
 def train_model_2node_16xh100(config_path: str, run_name: Optional[str] = None) -> dict:
     """
     Training with 2 nodes × 8x H100 GPUs = 16 GPUs total (multi-node distributed training).
@@ -719,7 +764,7 @@ def main(
 
     # Automatically choose the right training function based on config
     if "2node" in config.lower() or "16xh100" in config.lower() or "multinode" in config.lower():
-        print("   Using 2 nodes × 8x H100 GPUs = 16 GPUs (multi-node training)...")
+        print("   Using 2 nodes × 8x H100 GPUs = 16 GPUs (multi-node training with RDMA/EFA)...")
         result = train_model_2node_16xh100.remote(config, run_name)
     elif "70m" in config or "8xh100" in config.lower() or "h100" in config.lower():
         print("   Using 8x H100 GPUs (single-node training)...")
