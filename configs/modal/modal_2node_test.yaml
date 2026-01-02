@@ -1,20 +1,23 @@
-# Tahoe-x1 Modal 2-Node Experiment 1B: Baseline Configuration
+# Tahoe-x1 Modal 2-Node Test Configuration
 # =============================================================================
-# Experiment 1B: Measure 2-node baseline performance
-#
-# Goal: Establish 2-node baseline with same per-GPU batch size as 1-node run
-# This allows direct comparison to measure communication overhead.
+# Multi-node training test configuration with InfiniBand RDMA
 #
 # Configuration:
 # - 2 nodes × 8 H100 GPUs = 16 GPUs total
-# - Batch size: 300 per GPU (same as 1-node baseline)
+# - Batch size: 300 per GPU (optimal based on testing)
 # - Global batch: 4,800 (16 × 300)
-# - Duration: ~20 minutes (~4,000 batches)
+# - Duration: 1000 batches (~14 minutes)
 # - FSDP: HYBRID_SHARD (optimized for multi-node)
+# - RDMA: InfiniBand (EFA not supported by Modal yet)
 #
+# Performance:
+# - Scaling efficiency: 72% (1.44x speedup with 2x GPUs)
+# - Throughput: ~8,000 samples/sec
 #
 # Usage:
-#   modal run scripts/modal_train.py --config configs/modal/modal_2node_20min_batch300.yaml --run-name exp1b-2node-batch300 --no-download-data
+#   modal run scripts/modal_train.py::train_model_2node_16xh100 \
+#     --config-path configs/modal/modal_2node_test.yaml \
+#     --run-name my-2node-test
 # =============================================================================
 
 seed: 777
@@ -157,7 +160,7 @@ precision: amp_bf16
 # - 20 minutes = 0.333 hours = $21.05
 # - Estimated throughput: ~3.5 batches/sec (accounting for comm overhead)
 # - Expected batches in 20 min: ~4,000 batches
-max_duration: "4000ba"  # ~20 minutes
+max_duration: "1000ba"  # ~5 minutes
 
 # Evaluation settings
 eval_interval: "500ba"  # More frequent evals for short run

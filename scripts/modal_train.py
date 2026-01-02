@@ -34,38 +34,60 @@ app = modal.App("tahoe-x1-training")
 # Base: mosaicml/llm-foundry:2.2.1_cu121_flash2-813d596
 #
 # EFA (Elastic Fabric Adapter) Setup for Multi-Node RDMA:
-# AWS EFA enables high-performance RDMA networking between instances for multi-node training.
-# We install EFA userspace libraries and the OFI-NCCL plugin so NCCL can use EFA for communication.
-EFA_VERSION = "1.44.0"
-OFI_NCCL_VERSION = "1.17.2-aws"
+# NOTE: EFA support is currently disabled because Modal's EFA infrastructure is broken.
+# Their own example (modal_train_efa.py) crashes with SIGSEGV when efa_enabled=True.
+# Using InfiniBand RDMA instead (rdma=True without efa_enabled flag).
+#
+# COMMENTED OUT - EFA installation (restore when Modal fixes EFA support):
+# EFA_INSTALLER_VERSION = "1.44.0"
+# AWS_OFI_NCCL_VERSION = "1.17.2"
 
 image = (
     modal.Image.from_registry("ghcr.io/tahoebio/tahoe-x1:1.0.0")
     # Create symlink for Modal Python detection (python is at /composer-python/python)
     .run_commands("ln -sf /composer-python/python /usr/bin/python")
-    # Install EFA dependencies for multi-node RDMA support
-    .apt_install(
-        "libibverbs-dev",
-        "libibverbs1",
-        "wget",
-        "ca-certificates",
-    )
-    # Install AWS EFA userspace libraries
-    .run_commands(
-        f"cd /tmp && wget -q https://efa-installer.amazonaws.com/aws-efa-installer-{EFA_VERSION}.tar.gz",
-        f"cd /tmp && tar -xzf aws-efa-installer-{EFA_VERSION}.tar.gz",
-        f"cd /tmp/aws-efa-installer && ./efa_installer.sh -y --minimal",
-        "rm -rf /tmp/aws-efa-installer*",
-    )
-    # Install AWS OFI-NCCL plugin (enables NCCL to use EFA)
-    .run_commands(
-        f"cd /opt && wget -q https://github.com/aws/aws-ofi-nccl/releases/download/v{OFI_NCCL_VERSION}/aws-ofi-nccl-{OFI_NCCL_VERSION}.tar.gz",
-        f"cd /opt && tar -xzf aws-ofi-nccl-{OFI_NCCL_VERSION}.tar.gz",
-        f"rm aws-ofi-nccl-{OFI_NCCL_VERSION}.tar.gz",
-        # Remove EFA from default library paths to prevent conflicts on non-EFA hardware
-        "rm -f /etc/ld.so.conf.d/000_efa.conf /etc/ld.so.conf.d/100_ofinccl.conf",
-        "ldconfig",
-    )
+    # COMMENTED OUT - EFA dependencies (not needed for InfiniBand RDMA):
+    # .apt_install(
+    #     "libibverbs-dev",
+    #     "libibverbs1",
+    #     "wget",
+    #     "ca-certificates",
+    #     "curl",
+    #     "build-essential",
+    #     "devscripts",
+    #     "debhelper",
+    #     "check",
+    #     "libsubunit-dev",
+    #     "fakeroot",
+    #     "pkg-config",
+    #     "dkms",
+    #     "libhwloc-dev",
+    # )
+    # COMMENTED OUT - EFA installer:
+    # .run_commands(
+    #     f"""cd /tmp && \
+    #     curl -O https://efa-installer.amazonaws.com/aws-efa-installer-{EFA_INSTALLER_VERSION}.tar.gz && \
+    #     tar -xf /tmp/aws-efa-installer-{EFA_INSTALLER_VERSION}.tar.gz && \
+    #     cd aws-efa-installer && \
+    #     ./efa_installer.sh -y -d --skip-kmod --skip-limit-conf --no-verify
+    #     """,
+    # )
+    # COMMENTED OUT - OFI-NCCL compilation:
+    # .run_commands(
+    #     f"""cd /tmp && \
+    #     wget https://github.com/aws/aws-ofi-nccl/releases/download/v{AWS_OFI_NCCL_VERSION}/aws-ofi-nccl-{AWS_OFI_NCCL_VERSION}.tar.gz && \
+    #     tar xf /tmp/aws-ofi-nccl-{AWS_OFI_NCCL_VERSION}.tar.gz && \
+    #     cd aws-ofi-nccl-{AWS_OFI_NCCL_VERSION} && \
+    #     LDFLAGS="-L/opt/amazon/efa/lib -Wl,--allow-shlib-undefined" ./configure --with-libfabric=/opt/amazon/efa/ --with-cuda=/usr/local/cuda --prefix=/opt/amazon/ofi-nccl --disable-nccl-net-symlink && \
+    #     make && \
+    #     make install
+    #     """,
+    # )
+    # COMMENTED OUT - EFA cleanup:
+    # .run_commands(
+    #     "rm -f /etc/ld.so.conf.d/000_efa.conf",
+    #     "rm -f /etc/ld.so.conf.d/100_ofinccl.conf",
+    # )
     .workdir("/root")
     # Add local code for development (overrides the installed tahoe-x1 package)
     # Note: add_local_dir must come absolutely last in the build chain
@@ -548,18 +570,18 @@ GPU_CONFIG = f"H100:{N_GPU_PER_NODE}"
     },
     timeout=3600 * 12,
     secrets=[modal.Secret.from_name("wandb-api-key")],
-    # EFA environment variables for NCCL to use AWS EFA networking
+    # Enable NCCL debug logging
     env={
-        "LD_LIBRARY_PATH": "/opt/amazon/ofi-nccl/lib:/opt/amazon/efa/lib",
-        "NCCL_NET_PLUGIN": "ofi",
+        "NCCL_DEBUG": "INFO",
     },
+    # COMMENTED OUT - EFA flag (Modal's EFA support is broken):
+    # experimental_options={
+    #     "efa_enabled": True,
+    # },
 )
 @modal.experimental.clustered(
     size=N_NODES,
-    rdma=True,  # Enable RDMA for high-speed inter-node communication
-    experimental_options={
-        "efa_enabled": True,  # Enable AWS EFA hardware
-    },
+    rdma=True,  # Enable InfiniBand RDMA (not EFA)
 )
 def train_model_2node_16xh100(config_path: str, run_name: Optional[str] = None) -> dict:
     """
@@ -570,6 +592,17 @@ def train_model_2node_16xh100(config_path: str, run_name: Optional[str] = None) 
     """
     import torch
     from omegaconf import OmegaConf
+
+    # COMMENTED OUT - EFA runtime setup (not needed for InfiniBand RDMA):
+    # if os.environ.get("MODAL_CLOUD_PROVIDER") == "CLOUD_PROVIDER_AWS":
+    #     existing_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
+    #     efa_ld_path = "/opt/amazon/ofi-nccl/lib:/opt/amazon/efa/lib"
+    #     os.environ["LD_LIBRARY_PATH"] = f"{efa_ld_path}:{existing_ld_path}" if existing_ld_path else efa_ld_path
+    #     os.environ["NCCL_NET_PLUGIN"] = "ofi"
+    #     print("✓ Enabled EFA/OFI networking (AWS cloud provider detected)")
+    # else:
+    #     print(f"⚠️  Non-AWS cloud provider detected: {os.environ.get('MODAL_CLOUD_PROVIDER', 'UNKNOWN')}")
+    #     print("   Using standard networking (EFA not available)")
 
     # Get cluster information from Modal
     cluster_info = modal.experimental.get_cluster_info()
@@ -592,6 +625,23 @@ def train_model_2node_16xh100(config_path: str, run_name: Optional[str] = None) 
     print(f"  Available GPUs: {num_gpus}")
     print(f"  GPU Type: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None'}")
     print(f"  Total GPUs in cluster: {num_gpus * world_size}")
+
+    # COMMENTED OUT - EFA debug output (not needed for InfiniBand RDMA):
+    # print(f"\nEFA/NCCL Debug Info (Node {node_rank}):")
+    # print(f"  LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', 'NOT SET')}")
+    # print(f"  NCCL_NET_PLUGIN: {os.environ.get('NCCL_NET_PLUGIN', 'NOT SET')}")
+    # print(f"  FI_PROVIDER: {os.environ.get('FI_PROVIDER', 'NOT SET')}")
+    # import subprocess
+    # try:
+    #     ofi_nccl_check = subprocess.run(
+    #         ["ls", "-la", "/opt/amazon/ofi-nccl/lib/"],
+    #         capture_output=True,
+    #         text=True,
+    #         timeout=5,
+    #     )
+    #     print(f"  OFI-NCCL libs: {ofi_nccl_check.stdout if ofi_nccl_check.returncode == 0 else 'NOT FOUND'}")
+    # except Exception as e:
+    #     print(f"  OFI-NCCL check failed: {e}")
 
     # Load and configure training config
     print(f"\nLoading config: {config_path}")
@@ -648,14 +698,18 @@ def train_model_2node_16xh100(config_path: str, run_name: Optional[str] = None) 
     print("=" * 80 + "\n")
 
     # Composer CLI with multi-node parameters
-    # These match what torch.distributed.run expects
+    # world_size = total GPUs = nnodes * nproc_per_node
+    total_gpus = world_size * num_gpus
+    # base_rank = node_rank * nproc_per_node
+    base_rank = node_rank * num_gpus
+
     cmd = [
         "composer",
-        f"--nnodes={world_size}",
-        f"--node_rank={node_rank}",
+        f"-n={num_gpus}",  # number of processes (GPUs) per node
+        f"--world_size={total_gpus}",  # total number of GPUs across all nodes
+        f"--base_rank={base_rank}",  # starting rank for this node's processes
         f"--master_addr={master_addr}",
         f"--master_port=1234",
-        f"--nproc_per_node={num_gpus}",
         "/root/scripts/train.py",
         temp_config_path,
     ]
